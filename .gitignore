@@ -1,0 +1,11 @@
+venv/
+.venv/
+__pycache__/
+*.pyc
+build/
+dist/
+*.spec
+frozen-*/
+frozen-*.json
+.env
+.env.*
