@@ -2,7 +2,9 @@
 (() => {
   'use strict';
   if (location.origin !== 'https://farmricochet.com' || location.pathname.replace(/\/$/, '') !== '/play') return;
-  if (window.FarmRicochetesExtension) return;
+  const previous=window.FarmRicochetesExtension;
+  if (previous?.version==='1.4.0') return;
+  if (previous?.dispose) previous.dispose(); else previous?.disable?.();
   const install = () => {
     return (// JavaScript | farm-pvp-ricochetes.js | Chrome | https://farmricochet.com/play
 (function (factory) {
@@ -49,6 +51,15 @@
       #farm-pvp-trajetoria-controls .fpt-small{color:#c5ddd2;font-size:11px}
       #farm-pvp-trajetoria-controls .fpt-status{min-height:17px}
       #farm-pvp-trajetoria-controls .fpt-more{margin-top:7px}
+      #farm-pvp-trajetoria-controls .fpt-tactics{border-top:1px solid #527463;margin-top:8px;padding-top:8px}
+      #farm-pvp-trajetoria-controls .fpt-tactics button{padding:6px 8px}
+      #farm-pvp-trajetoria-controls select{max-width:100%;background:#203d31;color:inherit;border:1px solid #779c89;border-radius:5px;padding:5px;font:inherit}
+      #farm-pvp-trajetoria-controls ul{padding-left:17px;margin:6px 0}
+      #farm-pvp-trajetoria-controls li{margin:4px 0;overflow-wrap:anywhere}
+      #farm-pvp-trajetoria-controls summary{cursor:pointer;margin:6px 0}
+      #farm-pvp-trajetoria-controls [data-wizard-radius]{width:58px;background:#203d31;color:inherit;border:1px solid #779c89}
+      #farm-pvp-trajetoria-controls [data-damage]{color:#a7ffcd}
+      #farm-pvp-trajetoria-controls [data-search-status]{color:#ffe0a1}
       #farm-pvp-trajetoria-controls [hidden],#farm-pvp-trajetoria-controls[hidden]{display:none!important}
       </style>
       <canvas aria-label="Previsão de ricochetes e colisões" role="img"></canvas>
@@ -61,7 +72,20 @@
           <label><input type="checkbox" data-free> Explorar direção sem alterar a mira</label>
           <label data-angle-row hidden>Ângulo <input type="range" data-angle min="-180" max="180" step="1" value="-90"><output data-angle-out>−90°</output></label>
         </div>
-        <p class="fpt-small">Física estimada com peso, força e desaceleração. Verde: até o primeiro herói. Tracejados: sequência estimada; habilidades e mortes futuras não previstas.</p>
+        <p data-damage role="status"></p>
+        <div class="fpt-tactics">
+          <div class="fpt-row"><button type="button" data-search>Buscar maior dano</button><button type="button" data-cancel hidden>Cancelar</button></div>
+          <p data-search-status role="status" aria-live="polite">A busca compara ângulos e forças do herói ativo.</p>
+          <div data-best hidden><p><select data-proposals aria-label="Sugestões de jogada"></select></p><p data-best-summary></p>
+            <button type="button" data-apply>Ajustar mira do jogo</button>
+            <details><summary>Sequência de dano e avisos</summary><ul data-events></ul><p class="fpt-small" data-warnings></p></details>
+          </div>
+          <details><summary>Skills identificadas e opções</summary><ul data-skills></ul>
+            <label>Raio experimental da Explosão <input data-wizard-radius aria-label="Raio experimental da Explosão" type="number" min="0" max="400" step="5" value="0"></label>
+            <p class="fpt-small">0: área do Mago fora do dano. Um raio informado é hipótese; não foi confirmado no servidor.</p>
+          </details>
+        </div>
+        <p class="fpt-small">Verde: mira atual. Dourado: sugestão. Roxo: trajeto do Ladino na Emboscada prevista. Física, sequência e dano estimados; maior dano real não garantido. Ajustar mira não lança.</p>
       </section>`;
     host.append(root);
     const canvas = root.querySelector('canvas');
@@ -70,10 +94,94 @@
     const sidebar = ui.overlay.querySelector('.pvp-details');
     if (sidebar) sidebar.prepend(panel); else host.insertAdjacentElement('afterend', panel);
     const status = panel.querySelector('.fpt-status');
-    const settings = { enabled: true, count: 12, chain: true, free: false, angle: -Math.PI / 2 };
+    const settings = { enabled: true, count: 12, chain: true, free: false, angle: -Math.PI / 2, wizardRadius:0 };
     let destroyed = false, timer, key = '', result = null, lastInfo = {}, lastPaint = 0;
+    let searchJob=0, searching=false, proposals=null, proposalIndex=0, proposalKey='', skillsKey='';
     const aborter = new AbortController();
     const listen = (node, type, callback) => node.addEventListener(type, callback, { signal: aborter.signal });
+    const searchButton=panel.querySelector('[data-search]'), cancelButton=panel.querySelector('[data-cancel]');
+    const searchStatus=panel.querySelector('[data-search-status]'), bestPanel=panel.querySelector('[data-best]');
+    const proposalSelect=panel.querySelector('[data-proposals]'), damageStatus=panel.querySelector('[data-damage]');
+    const fmt = value => new Intl.NumberFormat('pt-BR',{maximumFractionDigits:0}).format(value);
+    const name = (heroes,index) => `${math.HERO_NAMES[heroes[index]?.code] || heroes[index]?.code || '?'} (${heroes[index]?.team===ui.view?.seat?'aliado':'inimigo'})`;
+    function stopSearch(message='Busca cancelada.') {
+      searchJob++; searching=false; cancelButton.hidden=true;
+      searchStatus.textContent=message;
+    }
+    function clearProposals(message) {
+      stopSearch(message); proposals=null; bestPanel.hidden=true; proposalKey='';
+    }
+    function renderSkills(heroes, activeIndex=-1) {
+      const next=JSON.stringify([activeIndex,heroes.map(h=>[h.code,h.team,h.skill,h.rulesVersion,h.hp,h.health])]);
+      if (next===skillsKey) return; skillsKey=next;
+      const list=panel.querySelector('[data-skills]'); list.replaceChildren();
+      heroes.forEach((hero,i)=>{
+        if (hero.hp !== undefined && hero.hp<=0) return;
+        const skill=math.skillInfo(hero,i,activeIndex,heroes), item=document.createElement('li');
+        const side=hero.team===undefined?'':hero.team===ui.view?.seat?'Aliado · ':'Inimigo · ';
+        item.textContent=`${side}${skill.hero} — ${skill.name}: ${skill.description}${skill.supported?'':' [regra não confirmada nesta versão]'}`;
+        list.append(item);
+      });
+    }
+    function renderProposal() {
+      const proposal=proposals?.results[proposalIndex], heroes=ui.view?.battle?.heroes;
+      if (!proposal || !heroes) return;
+      bestPanel.hidden=false;
+      const score=proposal.combat;
+      panel.querySelector('[data-best-summary]').textContent=`≈ ${fmt(score.damage)} HP de dano · ${score.kills} abate(s) · ${fmt(score.healing)} de cura · ${score.ambushes} Emboscada(s) · ${(proposal.angle*180/Math.PI).toFixed(1)}° · força ${Math.round(proposal.power*100)}%`;
+      const list=panel.querySelector('[data-events]'); list.replaceChildren();
+      for (const event of score.events.slice(0,24)) {
+        const item=document.createElement('li');
+        const labels=(event.tags||[]).map(tag=>tag==='ally-enemy-rogue'?'aliado → inimigo → Ladino':math.SKILL_NAMES[tag]||tag);
+        item.textContent=`${(event.at/1000).toFixed(2)}s · ${name(heroes,event.source)} → ${name(heroes,event.target)}: ${event.kind==='heal'?'+':'−'}${fmt(event.value)} HP${labels.length?' · '+labels.join(', '):''}`;
+        list.append(item);
+      }
+      const warnings=['Geometria e janela de contato estimadas (150 ms).',...score.warnings];
+      panel.querySelector('[data-warnings]').textContent=warnings.join(' ');
+      searchStatus.textContent=`Melhor estimativa entre ${proposals.tested} simulações${proposals.timedOut?' · limite de tempo atingido':''}.`;
+    }
+    async function findBest() {
+      if (searching) return;
+      const view=ui.view, heroes=view?.battle?.heroes;
+      if (!heroes?.length || !ui.canAim()) { searchStatus.textContent='A busca fica disponível durante a sua vez.'; return; }
+      const activeIndex=view.battle.active, stateKey=math.battleKey(view), token=++searchJob;
+      const input={heroes:heroes.map(h=>({...h})),activeIndex,boundary:view.boundary,
+        angle:ui.aim.angle,power:ui.aim.power,combat:{wizardRadius:settings.wizardRadius}};
+      searching=true; searchButton.disabled=true; cancelButton.hidden=false;
+      bestPanel.hidden=true; proposals=null; searchStatus.textContent='Comparando direções e forças…';
+      try {
+        const answer=await math.searchShots(input,{
+          budgetMs:3000,yieldFn:()=>new Promise(resolve=>setTimeout(resolve,0)),
+          shouldCancel:()=>destroyed || token!==searchJob || math.battleKey(ui.view)!==stateKey || !ui.canAim(),
+          onProgress:({tested,best})=>{ if (token===searchJob && !destroyed) searchStatus.textContent=`${tested} simulações · melhor dano calculado ≈ ${fmt(best.combat.damage)} HP`; }
+        });
+        if (destroyed || token!==searchJob) return;
+        if (answer.cancelled) { clearProposals('Estado da partida mudou. Faça a busca na sua próxima vez.'); return; }
+        proposals=answer; proposalKey=stateKey; proposalIndex=0;
+        proposalSelect.replaceChildren();
+        answer.results.forEach((p,i)=>{
+          const option=document.createElement('option'); option.value=String(i);
+          option.textContent=`#${i+1} · ≈ ${fmt(p.combat.damage)} HP · força ${Math.round(p.power*100)}%`;
+          proposalSelect.append(option);
+        });
+        renderProposal();
+      } catch(error) { searchStatus.textContent=`Busca indisponível: ${error.message}`; }
+      finally { if (token===searchJob) { searching=false; cancelButton.hidden=true; } }
+    }
+    listen(searchButton,'click',findBest);
+    listen(cancelButton,'click',()=>stopSearch());
+    listen(proposalSelect,'change',()=>{proposalIndex=Number(proposalSelect.value);renderProposal();});
+    listen(panel.querySelector('[data-wizard-radius]'),'change',event=>{
+      settings.wizardRadius=Math.min(400,Math.max(0,Number(event.target.value)||0)); event.target.value=settings.wizardRadius;
+      key=''; clearProposals('Opção da Explosão alterada. Faça uma nova busca.');
+    });
+    listen(panel.querySelector('[data-apply]'),'click',()=>{
+      const proposal=proposals?.results[proposalIndex];
+      if (!proposal || proposalKey!==math.battleKey(ui.view) || !ui.canAim()) { clearProposals('Sugestão expirou. Faça uma nova busca.'); return; }
+      ui.aim={...ui.aim,angle:proposal.angle,power:proposal.power}; ui.keyboardAim=true;
+      settings.free=false; panel.querySelector('[data-free]').checked=false; panel.querySelector('[data-angle-row]').hidden=true; key='';
+      searchStatus.textContent='Mira ajustada. O lançamento continua manual, pelo jogo.';
+    });
     listen(panel.querySelector('[data-close]'), 'click', () => api.destroy());
     listen(panel.querySelector('[data-fold]'), 'click', () => {
       const box = panel.querySelector('.fpt-more'); box.hidden = !box.hidden;
@@ -120,24 +228,28 @@
       ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.clearRect(0, 0, w, h);
       if (!settings.enabled) { say('Previsão desativada.'); return; }
       const view = ui.view;
-      if (!view?.battle?.heroes?.length) { say('Aguardando uma sala com heróis na arena.'); return; }
-      if (ui.playingReplay()) { say('Aguardando o fim da animação do servidor.'); return; }
+      const currentKey=math.battleKey(view);
+      searchButton.disabled=searching || !ui.canAim();
+      if (proposalKey && proposalKey!==currentKey) clearProposals('Estado da partida mudou. Faça uma nova busca.');
+      const skillHeroes=view?.battle?.heroes || ui.roster?.filter(h=>ui.selected?.has(h.id)) || [];
+      renderSkills(skillHeroes,view?.battle?.active ?? -1);
+      if (!view?.battle?.heroes?.length) { damageStatus.textContent=''; say('Aguardando uma sala com heróis na arena.'); return; }
+      if (ui.playingReplay()) { damageStatus.textContent=''; say('Aguardando o fim da animação do servidor.'); return; }
       const activeIndex = view.battle.active ?? 0;
       const hero = view.battle.heroes[activeIndex];
       if (!hero || hero.hp <= 0) { say('Sem herói ativo para prever.'); return; }
       if (!settings.free && view.status !== 'waiting' && !ui.canAim()) {
-        say(view.status === 'finished' ? 'Partida encerrada.' : 'Aguardando sua vez.'); return;
+        damageStatus.textContent=''; say(view.status === 'finished' ? 'Partida encerrada.' : 'Aguardando sua vez.'); return;
       }
       const angle = settings.free ? settings.angle : ui.aim.angle;
       const aim = { angle, power: settings.free ? 1 : ui.aim.power };
-      const nextKey = JSON.stringify([view.code, view.battle.turn, activeIndex, view.seat,
-        view.boundary, view.battle.heroes.map(x => [x.x, x.y, x.hp, x.radius, x.weight ?? x.mass]), aim, settings.count, settings.chain]);
+      const nextKey = JSON.stringify([currentKey,aim,settings.count,settings.chain,settings.wizardRadius]);
       if (nextKey !== key) {
         key = nextKey;
         try {
           const boundary = math.boundary(view.boundary);
           const simulation = math.simulateTimed({ heroes: view.battle.heroes, activeIndex,
-            angle, power: aim.power, boundary, maxEvents: settings.count });
+            angle, power: aim.power, boundary, maxEvents:160,combat:{wizardRadius:settings.wizardRadius} });
           const trace = simulation.prefix;
           result = { trace, simulation };
           lastInfo = { room: view.code, status: view.status, turn: view.battle.turn,
@@ -146,10 +258,15 @@
             firstHero: trace.events.find(x => x.kind === 'hero')?.heroIndex ?? null,
             estimatedEvents: simulation.events.length, model: 'replay-fit-pvp-v13',
             power: aim.power, predictedDurationMs: simulation.durationMs,
-            calibration: 'partial-replay-fit', exactServerPhysics: false };
+            calibration: 'partial-replay-fit', exactServerPhysics: false,
+            estimatedDamage:simulation.combat.damage, estimatedKills:simulation.combat.kills,
+            estimatedHealing:simulation.combat.healing, ambushes:simulation.combat.ambushes,
+            warnings:simulation.combat.warnings };
         } catch (e) { result = null; say(`Prévia indisponível: ${e.message}`); return; }
       }
       if (!result) return;
+      const score=result.simulation.combat;
+      damageStatus.textContent=`${settings.free?'Prévia livre':'Mira atual'}: ≈ ${fmt(score.damage)} HP · ${score.kills} abate(s) · ${score.ambushes} Emboscada(s)${score.warnings.some(w=>w.includes('Explosão'))?' · área do Mago omitida ou estimada':''}`;
       ctx.setTransform(w / 480, 0, 0, h / 600, 0, 0);
       ctx.translate(90.6, view.seat === 1 ? 53 : 49); ctx.scale(0.83, 0.83);
       if (view.seat === 1) { ctx.translate(360, 600); ctx.scale(-1, -1); }
@@ -158,12 +275,12 @@
         for (const [i, path] of result.simulation.paths.entries()) {
           if (path.length < 2) continue;
           const own = view.battle.heroes[i].team === view.seat;
-          drawLine(path, own ? '#85d6ffb8' : '#ffab86b8', true, i === activeIndex ? 2.3 : 1.6);
+          drawLine(path.slice(0,settings.count+1), own ? '#85d6ffb8' : '#ffab86b8', true, i === activeIndex ? 2.3 : 1.6);
         }
       }
-      drawLine(result.trace.points, '#001d12c9', false, 6);
-      drawLine(result.trace.points, '#8bffbd', false, 2.7);
-      for (let i = 0; i < result.trace.events.length; i++) {
+      drawLine(result.trace.points.slice(0,settings.count+1), '#001d12c9', false, 6);
+      drawLine(result.trace.points.slice(0,settings.count+1), '#8bffbd', false, 2.7);
+      for (let i = 0; i < Math.min(settings.count,result.trace.events.length); i++) {
         const hit = result.trace.events[i];
         ctx.beginPath(); ctx.arc(hit.x, hit.y, 4, 0, Math.PI * 2);
         ctx.fillStyle = hit.kind === 'hero' ? '#ffd16b' : '#8bffbd'; ctx.fill();
@@ -172,17 +289,27 @@
         ctx.font = 'bold 12px system-ui'; ctx.fillStyle = '#ffffff'; ctx.strokeStyle = '#10271f'; ctx.lineWidth = 3;
         ctx.strokeText(String(i + 1), 0, 0); ctx.fillText(String(i + 1), 0, 0); ctx.restore();
       }
+      const best=proposals?.results[proposalIndex];
+      if (best && proposalKey===currentKey) {
+        drawLine(best.simulation.paths[activeIndex].slice(0,settings.count+1),'#ffcf60',true,3.5);
+        const ambushSources=new Set(best.combat.effects.filter(e=>e.kind==='farmer').map(e=>e.source));
+        for (const index of ambushSources) drawLine(best.simulation.paths[index].slice(0,settings.count+1),'#dc9bff',true,3);
+        const tip={x:hero.x+Math.cos(best.angle)*75,y:hero.y+Math.sin(best.angle)*75};
+        drawLine([{x:hero.x,y:hero.y},tip],'#ffcf60',false,3);
+        ctx.beginPath();ctx.arc(tip.x,tip.y,4,0,Math.PI*2);ctx.fillStyle='#ffcf60';ctx.fill();
+      }
       const first = result.trace.events.find(e => e.kind === 'hero');
       const bounces = result.trace.events.filter(e => e.kind === 'wall').length;
       const mode = view.status === 'waiting' ? 'Sala aguardando adversário' : settings.free ? 'Direção livre' : 'Mira atual';
       say(`${mode} · ${bounces} parede(s)${first ? ` · primeiro herói: ${view.battle.heroes[first.heroIndex].code}` : ''}`);
     }
     const api = {
-      version: '1.2.0', math,
-      info: () => ({ ...lastInfo, installed: !destroyed }),
+      version: '1.4.0', math,
+      info: () => ({ ...lastInfo, installed: !destroyed, searching,
+        recommendation:proposals?{tested:proposals.tested,maximumGuaranteed:false,results:proposals.results.map(p=>({angle:p.angle,power:p.power,damage:p.combat.damage,kills:p.combat.kills,ambushes:p.combat.ambushes,warnings:p.combat.warnings}))}:null }),
       destroy() {
         if (destroyed) return;
-        destroyed = true; cancelAnimationFrame(timer); aborter.abort(); root.remove(); panel.remove();
+        destroyed = true; searchJob++; cancelAnimationFrame(timer); aborter.abort(); root.remove(); panel.remove();
         if (changedPosition && host.style.position === 'relative') host.style.position = originalPosition;
         if (window.FarmPvpTrajetoria === api) delete window.FarmPvpTrajetoria;
       }
@@ -190,7 +317,7 @@
     window.FarmPvpTrajetoria = api;
     paint();
     return { installed: true, version: api.version, networkRequestsAdded: false,
-      model: 'Física estimada com peso, força e desaceleração ajustada a replays; habilidades e mortes futuras não previstas.' };
+      model: 'Busca de maior dano estimado, skills PvP v13 e mortes previstas; física e regras parcialmente confirmadas.' };
   })();
 })(function () {
   'use strict';
@@ -340,7 +467,7 @@
     lowSpeedDrag: 0.9, dragSlope: 0.002, wallRestitution: 0.94,
     heroRestitution: 0.96, stopSpeed: 7, stepSeconds: 1 / 240, maxSeconds: 8 });
   function simulateTimed({ heroes, activeIndex, angle, power = 0.8, boundary: polygon,
-    maxEvents = 24, parameters = {}, recordFrames = false }) {
+    maxEvents = 24, parameters = {}, recordFrames = false, combat = false, summaryOnly = false }) {
     const cfg = { ...REPLAY_FIT, ...parameters };
     const lines = edges(boundary(polygon));
     const bodies = heroes.map(h => ({ x: +h.x, y: +h.y, radius: +h.radius,
@@ -351,10 +478,12 @@
       throw new Error('Posição ou raio fora do contorno útil.');
     const speed = Math.max(0, Number(heroes[activeIndex].speed) || 460) * Math.max(0.1, Math.min(1, power)) * cfg.launchScale;
     selected.vx = Math.cos(angle) * speed; selected.vy = Math.sin(angle) * speed;
+    const damage = combat ? combatModel(heroes, activeIndex, bodies, typeof combat === 'object' ? combat : {}) : null;
     const paths = bodies.map(b => [{ x: b.x, y: b.y }]), events = [], frames = [];
     const prefix = { points: [{ x: selected.x, y: selected.y }], events: [] };
     let elapsed = 0, primaryOpen = true, ended = false;
     const append = i => {
+      if (summaryOnly) return;
       const b = bodies[i], last = paths[i].at(-1);
       if (Math.hypot(last.x - b.x, last.y - b.y) > 1e-5) paths[i].push({ x: b.x, y: b.y });
     };
@@ -362,12 +491,13 @@
     function hit(kind, i, j) {
       const a = bodies[i]; append(i); if (j !== undefined) append(j);
       events.push({ kind, i, j, x: a.x, y: a.y, at: elapsed * 1000 });
-      if (primaryOpen && (i === activeIndex || j === activeIndex)) {
+      if (!summaryOnly && primaryOpen && (i === activeIndex || j === activeIndex)) {
         prefix.points.push({ x: selected.x, y: selected.y });
         prefix.events.push({ kind, x: selected.x, y: selected.y,
           heroIndex: kind === 'hero' ? (i === activeIndex ? j : i) : undefined });
         if (kind === 'hero') primaryOpen = false;
       }
+      if (kind === 'hero') damage?.contact(i, j, elapsed * 1000);
       if (events.length >= Math.max(1, maxEvents)) ended = true;
       frame();
     }
@@ -376,13 +506,14 @@
       if (!bodies.some(b => b.alive && Math.hypot(b.vx, b.vy) >= cfg.stopSpeed)) break;
       const dt = Math.min(cfg.stepSeconds, cfg.maxSeconds - elapsed);
       // The observed v13 replays slow low-speed bodies more strongly than fast ones.
-      for (const b of bodies) {
+      for (const [index, b] of bodies.entries()) {
         const v = Math.hypot(b.vx, b.vy);
         if (!b.alive || v < cfg.stopSpeed) { b.vx = b.vy = 0; continue; }
         const drag = Math.max(cfg.highSpeedDrag, cfg.lowSpeedDrag - cfg.dragSlope * v);
         const decay = Math.exp(-drag * dt);
         b.vx *= decay; b.vy *= decay;
         b.x += b.vx * dt; b.y += b.vy * dt;
+        damage?.travel(index, Math.hypot(b.vx, b.vy) * dt);
       }
       elapsed += dt;
       // Replays report contact on a simulation substep, after overlap. Resolve that
@@ -402,6 +533,7 @@
           }
         }
         for (let j = i + 1; j < bodies.length && !ended; j++) {
+          if (!a.alive) break;
           const b = bodies[j]; if (!b.alive) continue;
           const dx = b.x - a.x, dy = b.y - a.y, length = Math.hypot(dx, dy);
           const overlap = a.radius + b.radius - length;
@@ -422,21 +554,221 @@
       if (tick % 8 === 7 || ended) frame();
     }
     bodies.forEach((_, i) => append(i));
-    if (primaryOpen) prefix.points.push({ x: selected.x, y: selected.y });
+    if (!summaryOnly && primaryOpen) prefix.points.push({ x: selected.x, y: selected.y });
+    const truncated = ended || (elapsed >= cfg.maxSeconds - EPS && bodies.some(b => b.alive && Math.hypot(b.vx, b.vy) >= cfg.stopSpeed));
+    damage?.finish(elapsed * 1000, !truncated);
     frame();
-    return { paths, prefix, events, bodies, durationMs: elapsed * 1000, frames, parameters: cfg };
+    return { paths, prefix, events, bodies, durationMs: elapsed * 1000, frames, parameters: cfg,
+      truncated, combat: damage?.summary() ?? null };
   }
-  return { boundary, trace, simulate, simulateTimed, collisionTime, reflect, REPLAY_FIT };
+
+  const HERO_NAMES = Object.freeze({farmer:'Ladino', knight:'Cavaleiro', swordsman:'Espadachim',
+    runner:'Arqueira', wizard:'Mago', priest:'Sacerdote', templar:'Templário', woodcutter:'Machadeiro', lancer:'Lanceiro'});
+  const SKILL_NAMES = Object.freeze({farmer:'Emboscada', knight:'Escudo', swordsman:'Combo', runner:'Flecha Final',
+    wizard:'Explosão', priest:'Toque Curativo', templar:'Impacto Sagrado', woodcutter:'Sede de Sangue', lancer:'Investida'});
+  const number = value => Number.isFinite(Number(value)) ? Math.max(0, Number(value)) : 0;
+  function skillInfo(hero, index, activeIndex, heroes) {
+    const value = number(hero.skill), active = heroes?.[activeIndex];
+    const fmt = x => new Intl.NumberFormat('pt-BR', {maximumFractionDigits:1}).format(x);
+    const descriptions = {
+      farmer:`+${fmt(value)} de dano na jogada de outro aliado; conta mesmo quando o inimigo vem até o Ladino.`,
+      knight:`Bloqueia até ${fmt(value)} do primeiro ataque recebido no turno.`,
+      swordsman:`Combo de ${fmt(value)} por acerto na própria jogada. Ordem do primeiro bônus estimada.`,
+      runner:`Flecha de ${fmt(value)} no inimigo com menos HP absoluto, ao fim da jogada aliada.`,
+      wizard:`Explosão: ${fmt(value*100)}% do HP restante do alvo após o impacto. Área depende de alcance configurado.`,
+      priest:`Cura até ${fmt(value)} ao tocar outro aliado durante a jogada da equipe.`,
+      templar:`Na própria jogada, marca o inimigo; o próximo outro aliado causa +${fmt(value*100)}% nessa colisão.`,
+      woodcutter:`+${fmt(value)} de dano abaixo de 50% do HP máximo.`,
+      lancer:`+${fmt(value)} por 360 unidades percorridas; limite de +${fmt(value*2)}.`
+    };
+    return {code:hero.code, hero:HERO_NAMES[hero.code] || String(hero.code), name:SKILL_NAMES[hero.code] || 'Skill desconhecida',
+      value, description:descriptions[hero.code] || 'Habilidade fora do modelo.',
+      supported:hero.rulesVersion === 'pvp-v13' && !!SKILL_NAMES[hero.code],
+      eligible:hero.code === 'farmer' ? !!active && index !== activeIndex && hero.team === active.team
+        : hero.code === 'woodcutter' ? hero.hp < hero.health/2 : true};
+  }
+
+  // These rules use the values and descriptions exposed by PvP v13. The contact
+  // geometry, combo order and optional blast radius remain estimates, not server code.
+  function combatModel(heroes, activeIndex, bodies, options = {}) {
+    const side = heroes[activeIndex]?.team;
+    if (side === undefined || heroes.some(h => h.hp > 0 && (!Number.isFinite(+h.damage) || !Number.isFinite(+h.health) || h.team === undefined)))
+      throw new Error('Atributos de dano, vida ou equipe não disponíveis.');
+    const hp = heroes.map(h => number(h.hp)), initial = hp.slice();
+    const combo = heroes.map(() => 0), travelled = heroes.map(() => 0), shield = new Set(), marks = new Map();
+    const lastHitBy = new Map(), contactAt = new Map(), warnings = new Set();
+    const log = [], effects = [], totals = heroes.map(() => 0);
+    let healing = 0, ambushes = 0, complete = false, finalized = false;
+    const supported = h => h.rulesVersion === 'pvp-v13';
+    heroes.forEach(h => { if (h.hp > 0 && (!supported(h) || !SKILL_NAMES[h.code])) warnings.add('Classe ou versão de regras fora do modelo; skill omitida.'); });
+    const radius = Math.min(400, number(options.wizardRadius));
+    const cooldown = options.contactCooldownMs === undefined ? 150 : number(options.contactCooldownMs);
+    function effect(kind, source, target, value, at) { effects.push({kind, source, target, value, at}); }
+    function hurt(source, target, amount, at, tags = [], bonus = 0) {
+      if (hp[source] <= 0 || hp[target] <= 0 || heroes[source].team === heroes[target].team || !Number.isFinite(amount)) return 0;
+      let blocked = 0;
+      if (supported(heroes[target]) && heroes[target].code === 'knight' && !shield.has(target)) {
+        shield.add(target); blocked = Math.min(amount, number(heroes[target].skill));
+        effect('knight', target, target, blocked, at);
+      }
+      const value = Math.min(hp[target], Math.max(0, Math.round(amount - blocked)));
+      hp[target] -= value; totals[target] += value;
+      if (hp[target] <= 0) { bodies[target].alive = false; bodies[target].vx = bodies[target].vy = 0; }
+      log.push({kind:'hit', source, target, value, at, bonus, blocked, tags});
+      return value;
+    }
+    function contact(i, j, at) {
+      if (hp[i] <= 0 || hp[j] <= 0) return;
+      const key = `${Math.min(i,j)}:${Math.max(i,j)}`;
+      if (at - (contactAt.get(key) ?? -Infinity) < cooldown) return;
+      contactAt.set(key, at);
+      const a = heroes[i], b = heroes[j];
+      if (a.team === b.team) {
+        if (a.team !== side) return;
+        for (const [source,target] of [[i,j],[j,i]]) {
+          if (!supported(heroes[source]) || heroes[source].code !== 'priest') continue;
+          const value = Math.min(number(heroes[source].skill), Math.max(0, number(heroes[target].health)-hp[target]));
+          if (value > 0) {
+            hp[target] += value; healing += value;
+            log.push({kind:'heal',source,target,value,at,tags:['priest']}); effect('priest',source,target,value,at);
+          }
+        }
+        return;
+      }
+      const source = a.team === side ? i : b.team === side ? j : -1;
+      if (source < 0) return;
+      const target = source === i ? j : i, hero = heroes[source];
+      let amount = number(hero.damage), bonus = 0;
+      const tags = [];
+      if (supported(hero)) {
+        if (hero.code === 'farmer' && source !== activeIndex) {
+          bonus += number(hero.skill); ambushes++; tags.push('farmer');
+          effect('farmer',source,target,number(hero.skill),at);
+          if (lastHitBy.has(target) && lastHitBy.get(target) !== source) tags.push('ally-enemy-rogue');
+        }
+        if (hero.code === 'woodcutter' && hp[source] < number(hero.health)/2) {
+          bonus += number(hero.skill); tags.push('woodcutter'); effect('woodcutter',source,target,number(hero.skill),at);
+        }
+        if (hero.code === 'lancer') {
+          const extra = number(hero.skill)*Math.min(2, travelled[source]/360);
+          bonus += extra; if (extra > 0) { tags.push('lancer'); effect('lancer',source,target,extra,at); }
+        }
+        if (hero.code === 'swordsman' && source === activeIndex) {
+          // Conservative order: the first hit builds the bonus for the next hit.
+          bonus += combo[source]*number(hero.skill); combo[source]++;
+          tags.push('swordsman'); warnings.add('Ordem do primeiro bônus de Combo não confirmada.');
+          effect('swordsman',source,target,combo[source]*number(hero.skill),at);
+        }
+      }
+      amount += bonus;
+      const mark = marks.get(target);
+      if (mark && mark.source !== source) {
+        const extra = amount*mark.bonus; amount += extra; bonus += extra;
+        marks.delete(target); tags.push('templar'); effect('templar',source,target,extra,at);
+      }
+      hurt(source,target,amount,at,tags,bonus);
+      lastHitBy.set(target,source);
+      if (supported(hero) && hero.code === 'templar' && source === activeIndex && hp[target] > 0) {
+        marks.set(target,{source,bonus:number(hero.skill)}); effect('templar_mark',source,target,number(hero.skill),at);
+        warnings.add('Trajetória do empurrão do Templário estimada.');
+      }
+      if (supported(hero) && hero.code === 'wizard') {
+        if (!radius) { warnings.add('Explosão do Mago fora do dano: alcance da área não confirmado.'); return; }
+        warnings.add(`Raio de Explosão estimado manualmente em ${radius} unidades.`);
+        const areaDamage = hp[target]*number(hero.skill);
+        for (let k=0;k<heroes.length;k++) {
+          if (hp[k] <= 0 || heroes[k].team === side) continue;
+          if (Math.hypot(bodies[k].x-bodies[source].x,bodies[k].y-bodies[source].y) <= radius)
+            hurt(source,k,areaDamage,at,['wizard'],areaDamage);
+        }
+        effect('wizard',source,target,areaDamage,at);
+      }
+    }
+    function finish(at, isComplete = true) {
+      if (finalized) return;
+      finalized = true; complete = isComplete;
+      if (!isComplete) { warnings.add('Simulação atingiu limite: dano parcial e flechas finais omitidas.'); return; }
+      for (let source=0;source<heroes.length;source++) {
+        const hero = heroes[source];
+        if (hp[source] <= 0 || hero.team !== side || hero.code !== 'runner' || !supported(hero)) continue;
+        let target = -1;
+        for (let k=0;k<heroes.length;k++) if (hp[k] > 0 && heroes[k].team !== side && (target < 0 || hp[k] < hp[target])) target = k;
+        if (target >= 0) { hurt(source,target,number(hero.skill),at,['runner'],number(hero.skill)); effect('runner',source,target,number(hero.skill),at); }
+      }
+    }
+    return {contact, travel:(i,distance)=>{ travelled[i] += distance; }, finish,
+      summary:()=>({damage:totals.reduce((sum,value,i)=>sum+(heroes[i].team !== side?value:0),0), healing,
+        kills:hp.filter((value,i)=>initial[i]>0 && value<=0 && heroes[i].team!==side).length,
+        ambushes, hp:hp.slice(), byTarget:totals.slice(), events:log.slice(), effects:effects.slice(),
+        warnings:[...warnings], complete, exactServerRules:false})};
+  }
+
+  function battleKey(view) {
+    return JSON.stringify([view?.code,view?.status,view?.seat,view?.battle?.turn,view?.battle?.active,view?.battle?.side,view?.boundary,
+      view?.battle?.heroes?.map(h=>[h.code,h.team,h.x,h.y,h.hp,h.health,h.radius,h.weight??h.mass,h.speed,h.damage,h.skill,h.rulesVersion])]);
+  }
+  function compareShots(a,b) {
+    return b.combat.damage-a.combat.damage || b.combat.kills-a.combat.kills || b.combat.healing-a.combat.healing || a.power-b.power;
+  }
+  function candidateShots({heroes,activeIndex,angle=0,power=0.8}) {
+    const candidates = [{angle,power}], source = heroes[activeIndex];
+    for (let i=0;i<heroes.length;i++) {
+      const target = heroes[i]; if (i===activeIndex || target.hp<=0) continue;
+      const dx=target.x-source.x,dy=target.y-source.y,dist=Math.hypot(dx,dy);
+      const center=Math.atan2(dy,dx), spread=Math.asin(Math.min(1,(source.radius+target.radius)/Math.max(1,dist)));
+      for (const offset of [0,-0.8,-0.4,0.4,0.8]) for (const p of [1,0.75,0.5,0.3]) candidates.push({angle:center+spread*offset,power:p});
+    }
+    for (let step=0;step<120;step++) for (const p of [1,0.75,0.5,0.3]) candidates.push({angle:step*Math.PI/60-Math.PI,power:p});
+    return candidates;
+  }
+  async function searchShots(input, {budgetMs=3000, yieldEvery=8, yieldFn=()=>new Promise(r=>setTimeout(r,0)),
+    now=()=>performance.now(), shouldCancel=()=>false, onProgress=()=>{}, candidates=null} = {}) {
+    const started=now(), limit=Math.min(15000,Math.max(50,budgetMs)), seen=new Set(), ranked=[];
+    let tested=0, timedOut=false;
+    const evaluate = async choices => {
+      for (const candidate of choices) {
+        if (shouldCancel()) return false;
+        if (tested>0 && now()-started>=limit) { timedOut=true; return false; }
+        const angle=Math.atan2(Math.sin(candidate.angle),Math.cos(candidate.angle)), power=Math.min(1,Math.max(.1,candidate.power));
+        const key=`${angle.toFixed(7)}:${power.toFixed(4)}`; if (seen.has(key)) continue; seen.add(key);
+        const simulation=simulateTimed({...input,angle,power,combat:input.combat||true,summaryOnly:true,maxEvents:160});
+        const proposal={angle,power,combat:simulation.combat};
+        ranked.push(proposal); ranked.sort(compareShots); if (ranked.length>32) ranked.length=32;
+        tested++;
+        if (tested%yieldEvery===0) { onProgress({tested,best:ranked[0],elapsedMs:now()-started}); await yieldFn(); }
+      }
+      return true;
+    };
+    const coarseComplete=await evaluate(candidates || candidateShots(input));
+    if (coarseComplete && !candidates) {
+      const refined=[];
+      for (const best of ranked.slice(0,6)) for (const degrees of [-2,-1,-.5,0,.5,1,2]) for (const dp of [-.1,-.05,0,.05,.1])
+        refined.push({angle:best.angle+degrees*Math.PI/180,power:best.power+dp});
+      await evaluate(refined);
+    }
+    if (shouldCancel()) return {cancelled:true,tested,results:[],elapsedMs:now()-started};
+    const distinct=[];
+    for (const proposal of ranked) {
+      if (distinct.some(x=>Math.abs(Math.atan2(Math.sin(x.angle-proposal.angle),Math.cos(x.angle-proposal.angle)))<Math.PI/60 && Math.abs(x.power-proposal.power)<.1)) continue;
+      const simulation=simulateTimed({...input,...proposal,combat:input.combat||true,maxEvents:160});
+      distinct.push({...proposal,combat:simulation.combat,simulation}); if (distinct.length===3) break;
+    }
+    distinct.sort(compareShots);
+    return {cancelled:false,tested,results:distinct,elapsedMs:now()-started,timedOut,
+      maximumGuaranteed:false,model:'estimated-pvp-v13'};
+  }
+  return { boundary, trace, simulate, simulateTimed, collisionTime, reflect, REPLAY_FIT,
+    combatModel, skillInfo, battleKey, searchShots, candidateShots, compareShots, HERO_NAMES, SKILL_NAMES };
 })
 );
   };
   let enabled = true, busy = false, lastCanvas = null, error = '';
   async function tick() {
-    if (!enabled || busy) return;
+    if (!enabled || busy || previous?.info?.().busy) return;
     const canvas = document.querySelector('#pvp-canvas');
     if (!canvas || canvas === lastCanvas || typeof window.render_pvp_to_text !== 'function') return;
     if (window.FarmPvpTrajetoria?.info?.().installed) {
-      if (!lastCanvas) { lastCanvas = canvas; return; }
+      if (!lastCanvas && window.FarmPvpTrajetoria.version==='1.4.0') { lastCanvas = canvas; return; }
       window.FarmPvpTrajetoria.destroy();
     }
     busy = true;
@@ -449,8 +781,8 @@
     // A removal while the async import was pending must also remove its result.
     if (!enabled) { window.FarmPvpTrajetoria?.destroy?.(); lastCanvas = null; }
   }
-  window.FarmRicochetesExtension = {
-    version: '1.3.0',
+  const control = window.FarmRicochetesExtension = {
+    version: '1.4.0',
     async enable() {
       enabled = true; lastCanvas = null; error = '';
       await tick();
@@ -464,8 +796,12 @@
       window.FarmPvpTrajetoria?.destroy?.();
       return 'Previsão removida desta aba. Após recarregar, a extensão volta a ativar automaticamente.';
     },
-    info: () => ({ enabled, busy, error, installed: !!window.FarmPvpTrajetoria?.info?.().installed })
+    info: () => ({ enabled, busy, error, installed: !!window.FarmPvpTrajetoria?.info?.().installed }),
+    dispose() {
+      enabled=false; clearInterval(interval); window.FarmPvpTrajetoria?.destroy?.();
+      if (window.FarmRicochetesExtension===control) delete window.FarmRicochetesExtension;
+    }
   };
-  setInterval(tick, 1000);
+  const interval=setInterval(tick, 1000);
   void tick();
 })();
