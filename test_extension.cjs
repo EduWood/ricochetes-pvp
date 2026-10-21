@@ -5,13 +5,13 @@ const path = require('node:path');
 const template = fs.readFileSync(path.join(__dirname, 'loader-template.js'), 'utf8');
 function harness(options = {}) {
   const state = { canvas: options.canvas === false ? null : {}, installed: false, count: 0, removed: 0, fail: false };
-  const context = { location: { origin: options.origin || 'https://farmricochet.com', pathname: '/play' }, document: { querySelector: () => state.canvas }, window: { render_pvp_to_text() {} }, setInterval: callback => { state.tick = callback; } };
+  const context = { location: { origin: options.origin || 'https://farmricochet.com', pathname: '/play' }, document: { querySelector: () => state.canvas }, window: { render_pvp_to_text() {} }, clearInterval: () => {}, setInterval: callback => { state.tick = callback; return 1; } };
   context.installMock = async () => {
     state.count++;
     if (state.pending) await state.pending;
     if (state.fail) throw new Error('module unavailable');
     state.installed = true;
-    context.window.FarmPvpTrajetoria = { info: () => ({ installed: state.installed }), destroy() { state.installed = false; state.removed++; delete context.window.FarmPvpTrajetoria; } };
+    context.window.FarmPvpTrajetoria = { version:'1.4.0', info: () => ({ installed: state.installed }), destroy() { state.installed = false; state.removed++; delete context.window.FarmPvpTrajetoria; } };
   };
   vm.createContext(context);
   vm.runInContext(template.replace('/* OVERLAY_SOURCE */', 'installMock()'), context);

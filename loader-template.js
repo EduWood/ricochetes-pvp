@@ -2,17 +2,19 @@
 (() => {
   'use strict';
   if (location.origin !== 'https://farmricochet.com' || location.pathname.replace(/\/$/, '') !== '/play') return;
-  if (window.FarmRicochetesExtension) return;
+  const previous=window.FarmRicochetesExtension;
+  if (previous?.version==='1.4.0') return;
+  if (previous?.dispose) previous.dispose(); else previous?.disable?.();
   const install = () => {
     return /* OVERLAY_SOURCE */;
   };
   let enabled = true, busy = false, lastCanvas = null, error = '';
   async function tick() {
-    if (!enabled || busy) return;
+    if (!enabled || busy || previous?.info?.().busy) return;
     const canvas = document.querySelector('#pvp-canvas');
     if (!canvas || canvas === lastCanvas || typeof window.render_pvp_to_text !== 'function') return;
     if (window.FarmPvpTrajetoria?.info?.().installed) {
-      if (!lastCanvas) { lastCanvas = canvas; return; }
+      if (!lastCanvas && window.FarmPvpTrajetoria.version==='1.4.0') { lastCanvas = canvas; return; }
       window.FarmPvpTrajetoria.destroy();
     }
     busy = true;
@@ -25,8 +27,8 @@
     // A removal while the async import was pending must also remove its result.
     if (!enabled) { window.FarmPvpTrajetoria?.destroy?.(); lastCanvas = null; }
   }
-  window.FarmRicochetesExtension = {
-    version: '1.3.0',
+  const control = window.FarmRicochetesExtension = {
+    version: '1.4.0',
     async enable() {
       enabled = true; lastCanvas = null; error = '';
       await tick();
@@ -40,8 +42,12 @@
       window.FarmPvpTrajetoria?.destroy?.();
       return 'Previsão removida desta aba. Após recarregar, a extensão volta a ativar automaticamente.';
     },
-    info: () => ({ enabled, busy, error, installed: !!window.FarmPvpTrajetoria?.info?.().installed })
+    info: () => ({ enabled, busy, error, installed: !!window.FarmPvpTrajetoria?.info?.().installed }),
+    dispose() {
+      enabled=false; clearInterval(interval); window.FarmPvpTrajetoria?.destroy?.();
+      if (window.FarmRicochetesExtension===control) delete window.FarmRicochetesExtension;
+    }
   };
-  setInterval(tick, 1000);
+  const interval=setInterval(tick, 1000);
   void tick();
 })();

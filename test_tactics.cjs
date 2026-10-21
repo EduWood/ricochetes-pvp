@@ -1,0 +1,72 @@
+// JavaScript | test_tactics.cjs | Node 24 | PvP v13 combat and shot search
+'use strict';
+const assert=require('node:assert/strict');
+const M=require('./farm-pvp-ricochetes.js');
+const replay=require('./fixtures/turn6-v13.json');
+const hero=(code,team,x=100,y=100,extra={})=>({code,team,x,y,radius:14,weight:1,speed:460,hp:1000,health:1000,damage:100,skill:40,rulesVersion:'pvp-v13',...extra});
+function battle(heroes,activeIndex=0,options={}) {
+  const bodies=heroes.map(h=>({x:h.x,y:h.y,alive:h.hp>0,vx:0,vy:0}));
+  return {model:M.combatModel(heroes,activeIndex,bodies,options),bodies};
+}
+const close=(a,b)=>assert.ok(Math.abs(a-b)<1e-7,`${a} != ${b}`);
+async function main() {
+  let hs=[hero('priest',0),hero('farmer',0),hero('woodcutter',1)], r=battle(hs);
+  r.model.contact(0,2,100); r.model.contact(1,2,300);
+  let score=r.model.summary(); close(score.damage,240); assert.equal(score.ambushes,1);
+  assert.ok(score.events[1].tags.includes('ally-enemy-rogue'));
+  r=battle(hs,1);r.model.contact(1,2,100);close(r.model.summary().damage,100);assert.equal(r.model.summary().ambushes,0);
+  r=battle(hs,2);r.model.contact(0,2,100);assert.equal(r.model.summary().events[0].source,2,'only acting team damages');
+  hs=[hero('woodcutter',0),hero('knight',1)];r=battle(hs);
+  r.model.contact(0,1,100);r.model.contact(0,1,110);r.model.contact(0,1,300);
+  close(r.model.summary().damage,160);assert.equal(r.model.summary().effects.length,1,'shield once per turn');
+  hs=[hero('priest',0),hero('farmer',0,100,100,{hp:990})];r=battle(hs);
+  r.model.contact(0,1,100);close(r.model.summary().healing,10);close(r.model.summary().hp[0],1000);
+  hs=[hero('priest',0),hero('farmer',0,100,100,{hp:0})];r=battle(hs);r.model.contact(0,1,100);close(r.model.summary().healing,0);
+  hs=[hero('woodcutter',0,100,100,{hp:500}),hero('farmer',1)];r=battle(hs);r.model.contact(0,1,100);close(r.model.summary().damage,100);
+  hs[0].hp=499;r=battle(hs);r.model.contact(0,1,100);close(r.model.summary().damage,140);
+  hs=[hero('lancer',0),hero('farmer',1)];r=battle(hs);r.model.travel(0,1080);r.model.contact(0,1,100);close(r.model.summary().damage,180);
+  hs=[hero('swordsman',0),hero('farmer',1)];r=battle(hs);r.model.contact(0,1,100);r.model.contact(0,1,300);
+  close(r.model.summary().damage,240);assert.ok(r.model.summary().warnings.some(x=>x.includes('Combo')));
+  hs=[hero('templar',0,100,100,{skill:.5}),hero('farmer',0),hero('woodcutter',1)];r=battle(hs);
+  r.model.contact(0,2,100);r.model.contact(1,2,300);r.model.contact(1,2,500);
+  close(r.model.summary().damage,450);assert.ok(r.model.summary().events[1].tags.includes('templar'));
+  assert.ok(!r.model.summary().events[2].tags.includes('templar'),'mark consumed');
+  hs=[hero('wizard',0,100,100,{skill:.16}),hero('woodcutter',1,120,100),hero('farmer',1,150,100),hero('knight',1,250,100)];
+  r=battle(hs);r.model.contact(0,1,100);close(r.model.summary().damage,100);assert.ok(r.model.summary().warnings.some(x=>x.includes('alcance')));
+  r=battle(hs,0,{wizardRadius:80});r.model.contact(0,1,100);close(r.model.summary().damage,388);close(r.model.summary().hp[3],1000);
+  hs=[hero('priest',0),hero('runner',0),hero('farmer',1,100,100,{hp:300}),hero('woodcutter',1,100,100,{hp:100})];
+  r=battle(hs);r.model.finish(1000,true);close(r.model.summary().damage,40);assert.equal(r.model.summary().events[0].target,3);
+  r.model.finish(1000,true);close(r.model.summary().damage,40,'final arrows once');
+  r=battle(hs);r.model.finish(1000,false);close(r.model.summary().damage,0);assert.equal(r.model.summary().complete,false);
+  hs=[hero('farmer',0),hero('woodcutter',1,100,100,{hp:20})];r=battle(hs);r.model.contact(0,1,100);
+  close(r.model.summary().damage,20);assert.equal(r.model.summary().kills,1);assert.equal(r.bodies[1].alive,false);
+  r.model.contact(0,1,300);close(r.model.summary().damage,20,'no damage to corpse');
+  hs=[hero('priest',0),hero('farmer',0,100,100,{rulesVersion:'pvp-v99'}),hero('woodcutter',1)];
+  r=battle(hs);r.model.contact(1,2,100);close(r.model.summary().damage,100);assert.ok(r.model.summary().warnings.length);
+  assert.equal(M.skillInfo(hs[1],1,0,hs).supported,false);
+  assert.throws(()=>battle([{...hero('priest',0),damage:undefined},hero('farmer',1)]),/Atributos/);
+  const saved=JSON.stringify(replay);
+  const actual=M.simulateTimed({...replay,combat:true,maxEvents:160});
+  assert.equal(JSON.stringify(replay),saved,'original game snapshot unchanged');
+  assert.equal(actual.combat.events.length,replay.expected.events.length);
+  actual.combat.events.forEach((event,i)=>{
+    const measured=replay.expected.events[i];assert.equal(event.source,measured.source);assert.equal(event.target,measured.target);
+    close(event.value,measured.value);assert.ok(Math.abs(event.at-measured.at)<40);
+  });
+  assert.equal(actual.combat.ambushes,1);assert.equal(actual.combat.kills,1);
+  const choices=[{angle:replay.angle,power:replay.power},{angle:-3.0281462522101616,power:.8}];
+  const search=await M.searchShots({...replay,combat:true},{candidates:choices,budgetMs:15000,yieldFn:async()=>{}});
+  assert.equal(search.maximumGuaranteed,false);assert.equal(search.tested,2);
+  assert.ok(search.results[0].combat.damage>=actual.combat.damage);
+  assert.equal(search.results[0].simulation.combat.damage,search.results[0].combat.damage);
+  let cancel=false;
+  const cancelled=await M.searchShots({...replay,combat:true},{candidates:choices,yieldEvery:1,yieldFn:async()=>{cancel=true},shouldCancel:()=>cancel});
+  assert.equal(cancelled.cancelled,true);assert.equal(cancelled.results.length,0);
+  let clock=0;
+  const limited=await M.searchShots({...replay,combat:true},{candidates:choices,budgetMs:50,now:()=>clock+=100,yieldEvery:1,yieldFn:async()=>{}});
+  assert.equal(limited.timedOut,true);assert.equal(limited.tested,1);
+  const view={battle:{heroes:replay.heroes,active:0,turn:1},seat:0};const fingerprint=M.battleKey(view);
+  assert.notEqual(fingerprint,M.battleKey({...view,battle:{...view.battle,turn:2}}));
+  console.log('PASS: 9 skills, shield/heal/HP limits, no corpse hits, unsupported rules, real v13 ambush replay, search ranking, budget and cancellation.');
+}
+main().catch(error=>{console.error(error);process.exitCode=1});

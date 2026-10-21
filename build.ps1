@@ -13,5 +13,7 @@ if ($LASTEXITCODE -ne 0) { throw 'Falha ao gerar extensão.' }
 if ($LASTEXITCODE -ne 0) { throw 'Falha nos testes Python.' }
 node (Join-Path $buildRoot 'test_extension.cjs')
 if ($LASTEXITCODE -ne 0) { throw 'Falha nos testes da extensão.' }
+node (Join-Path $buildRoot 'test_tactics.cjs')
+if ($LASTEXITCODE -ne 0) { throw 'Falha nos testes de dano e busca.' }
 & $venvPython -m PyInstaller --noconfirm --onefile --windowed --name RicochetesPvP --version-file (Join-Path $buildRoot 'version.txt') --add-data ((Join-Path $buildRoot 'extension') + ';extension') --distpath (Join-Path $buildRoot 'dist') --workpath (Join-Path $buildRoot 'build') --specpath $buildRoot (Join-Path $buildRoot 'app.py')
 if ($LASTEXITCODE -ne 0) { throw 'Falha na compilação.' }

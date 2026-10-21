@@ -9,3 +9,5 @@ frozen-*/
 frozen-*.json
 .env
 .env.*
+preview/overlay.js
+releases/

@@ -9,7 +9,7 @@ import sys
 import tkinter as tk
 from tkinter import messagebox
 
-VERSION = '1.3.0'
+VERSION = '1.4.0'
 RESOURCE = Path(__file__).resolve().parent / 'extension'
 FILES = ('manifest.json', 'bootstrap.js', 'popup.html', 'popup.js')
 
@@ -40,7 +40,7 @@ class App:
             widget = tk.Label(frame, text=text, bg='#10231c', fg=color, font=('Segoe UI', size), anchor='w', justify='left', wraplength=580)
             widget.pack(fill='x', pady=(0, 13))
         label('Sua aba. Sua sessão.', 22, '#ecf4ef')
-        label('Versão 1.3 — instalação da extensão no navegador onde o jogo já está aberto.')
+        label('Versão 1.4 — instalação da extensão no navegador onde o jogo já está aberto.')
         label('1. Clique em Preparar extensão.\n2. No Chrome atual, abra chrome://extensions.\n3. Ative Modo do desenvolvedor e clique em Carregar sem compactação.\n4. Cole o caminho abaixo e selecione essa pasta.\n5. Volte à aba do jogo. No menu de extensões, abra Ricochetes PvP e clique em Ativar nesta aba.')
         self.path_value = tk.StringVar(value=str(self.destination))
         tk.Entry(frame, textvariable=self.path_value, state='readonly', readonlybackground='#19362b', fg='#ecf4ef', font=('Segoe UI', 10)).pack(fill='x', ipady=8, pady=(0, 12))
@@ -51,7 +51,7 @@ class App:
         tk.Button(frame, text='Copiar chrome://extensions', command=lambda: self.copy('chrome://extensions'), bg='#19362b', fg='#ecf4ef', relief='flat', pady=8).pack(anchor='w', pady=12)
         self.status = tk.StringVar(value='A instalação é feita uma vez. Depois, a extensão funciona sem este aplicativo aberto.')
         tk.Label(frame, textvariable=self.status, bg='#10231c', fg='#87e4af', justify='left', wraplength=580, anchor='w', font=('Segoe UI', 10)).pack(fill='x', pady=8)
-        label('O navegador e o login existentes são usados. A previsão continua estimada; habilidades e mortes futuras não são simuladas.', 10)
+        label('Na sua vez, use Buscar maior dano no painel da arena. Skills e mortes entram em um modelo estimado. Ajustar mira não lança.', 10)
 
     def copy(self, text):
         self.root.clipboard_clear()
